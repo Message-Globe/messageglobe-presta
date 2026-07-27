@@ -5,6 +5,8 @@
 **The official PrestaShop module for [MessageGlobe](https://messageglobe.com)** —
 sync your customers into MessageGlobe contact lists and deliver every store email over SMTP.
 
+**English** · [Italiano](README.it.md)
+
 [![Latest release](https://img.shields.io/github/v/release/Message-Globe/messageglobe-presta?sort=semver)](https://github.com/Message-Globe/messageglobe-presta/releases/latest)
 [![CI](https://github.com/Message-Globe/messageglobe-presta/actions/workflows/ci.yml/badge.svg)](https://github.com/Message-Globe/messageglobe-presta/actions/workflows/ci.yml)
 [![PrestaShop](https://img.shields.io/badge/PrestaShop-8.1%2B-df0067?logo=prestashop&logoColor=white)](https://www.prestashop.com)
