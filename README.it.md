@@ -90,7 +90,7 @@ Lo zip della release include l'SDK (`vendor/`): niente Composer sul server.
 git clone https://github.com/Message-Globe/messageglobe-presta.git modules/messageglobesync
 ```
 
-La cartella **deve** chiamarsi `messageglobesync`. Poi installa **Message Globe Contact Sync** dalla
+La cartella **deve** chiamarsi `messageglobesync`. Poi installa **Message Globe for PrestaShop** dalla
 Gestione moduli. Nessun passaggio Composer richiesto — l'SDK è incluso in `vendor/`.
 
 ## Configurazione
