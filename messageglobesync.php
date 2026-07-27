@@ -34,7 +34,7 @@ class Messageglobesync extends Module
     {
         $this->name = 'messageglobesync';
         $this->tab = 'administration';
-        $this->version = '1.1.0';
+        $this->version = '1.2.0';
         $this->author = 'Message Globe SRL';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -54,10 +54,6 @@ class Messageglobesync extends Module
             && $this->installDatabase()
             && $this->registerHook('actionObjectCustomerAddAfter')
             && $this->registerHook('actionObjectCustomerUpdateAfter')
-            && $this->registerHook('actionObjectCustomerDeleteAfter')
-            && $this->registerHook('actionObjectAddressAddAfter')
-            && $this->registerHook('actionObjectAddressUpdateAfter')
-            && $this->registerHook('actionObjectAddressDeleteAfter')
             && $this->registerHook('actionEmailSendBefore');
     }
 
@@ -98,6 +94,14 @@ class Messageglobesync extends Module
         $this->installDatabase();
         $this->setEmailDefaults();
         $this->registerHook('actionEmailSendBefore');
+
+        // Remove hooks earlier versions registered but this version no longer
+        // uses (address changes and customer deletion no longer sync), so a
+        // module upgraded in place stops reacting to them. Idempotent.
+        $this->unregisterHook('actionObjectCustomerDeleteAfter');
+        $this->unregisterHook('actionObjectAddressAddAfter');
+        $this->unregisterHook('actionObjectAddressUpdateAfter');
+        $this->unregisterHook('actionObjectAddressDeleteAfter');
 
         if ((int) Tools::getValue('ajax') === 1 && Tools::getValue('messageglobe_action')) {
             $this->processAjaxRequest();
@@ -447,30 +451,6 @@ class Messageglobesync extends Module
     public function hookActionObjectCustomerUpdateAfter(array $params)
     {
         $this->handleCustomerHook($params);
-    }
-
-    public function hookActionObjectCustomerDeleteAfter(array $params)
-    {
-        if (empty($params['object']) || !Validate::isLoadedObject($params['object'])) {
-            return;
-        }
-
-        $this->removeRemoteContactByCustomerId((int) $params['object']->id);
-    }
-
-    public function hookActionObjectAddressAddAfter(array $params)
-    {
-        $this->handleAddressHook($params);
-    }
-
-    public function hookActionObjectAddressUpdateAfter(array $params)
-    {
-        $this->handleAddressHook($params);
-    }
-
-    public function hookActionObjectAddressDeleteAfter(array $params)
-    {
-        $this->handleAddressHook($params);
     }
 
     protected function renderForm()
@@ -1133,20 +1113,6 @@ class Messageglobesync extends Module
         }
 
         $this->enqueueCustomer((int) $params['object']->id);
-    }
-
-    protected function handleAddressHook(array $params)
-    {
-        if (empty($params['object']) || !Validate::isLoadedObject($params['object'])) {
-            return;
-        }
-
-        $idCustomer = (int) $params['object']->id_customer;
-        if ($idCustomer <= 0) {
-            return;
-        }
-
-        $this->enqueueCustomer($idCustomer);
     }
 
     protected function syncCustomerById($idCustomer)
