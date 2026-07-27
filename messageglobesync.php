@@ -49,7 +49,7 @@ class Messageglobesync extends Module
     {
         $this->name = 'messageglobesync';
         $this->tab = 'administration';
-        $this->version = '1.3.0';
+        $this->version = '1.3.1';
         $this->author = 'Message Globe SRL';
         $this->need_instance = 0;
         $this->bootstrap = true;

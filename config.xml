@@ -2,7 +2,7 @@
 <module>
   <name>messageglobesync</name>
   <displayName><![CDATA[Message Globe for PrestaShop]]></displayName>
-  <version><![CDATA[1.3.0]]></version>
+  <version><![CDATA[1.3.1]]></version>
   <description><![CDATA[Sync customers to Message Globe, send transactional SMS (order-status updates and admin alerts), and route store email through the Message Globe SMTP relay. Reach them everywhere.]]></description>
   <author><![CDATA[Message Globe SRL]]></author>
   <tab><![CDATA[administration]]></tab>
