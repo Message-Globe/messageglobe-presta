@@ -1,0 +1,11 @@
+# Release build output
+/build/
+*.zip
+
+# OS / editor noise
+.DS_Store
+*.log
+*.swp
+
+# NOTE: vendor/ is intentionally committed — it holds the hand-bundled
+# MessageGlobe PHP SDK (REST source) that ships with the module. Do not ignore it.

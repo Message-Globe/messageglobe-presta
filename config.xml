@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<module>
+  <name>messageglobesync</name>
+  <displayName><![CDATA[Message Globe Contact Sync]]></displayName>
+  <version><![CDATA[1.0.0]]></version>
+  <description><![CDATA[Syncs customer email and phone number from PrestaShop to Message Globe contacts. Reach them everywhere.]]></description>
+  <author><![CDATA[Message Globe SRL]]></author>
+  <tab><![CDATA[administration]]></tab>
+  <is_configurable>1</is_configurable>
+  <need_instance>0</need_instance>
+</module>

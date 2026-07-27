@@ -1,0 +1,112 @@
+name: Build & release module zip
+
+# On a version tag (v1.2.3) this builds the installable PrestaShop module zip —
+# a single "messageglobesync/" folder with the bundled SDK included — and
+# attaches it to that tag's GitHub Release. A manual run uploads the same zip as
+# a build artifact instead, so a build can be verified without cutting a release.
+#
+# The module ships no Composer dependencies at runtime (the MessageGlobe PHP SDK
+# is committed under vendor/), so there is nothing to install — the repo tree is
+# the module.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version for a manual build (defaults to the module header)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          elif [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="$(grep -E "this->version[[:space:]]*=[[:space:]]*'" messageglobesync.php | head -1 | sed -E "s/.*=[[:space:]]*'([^']+)'.*/\1/")"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version $VERSION"
+
+      - name: Check module header and config.xml match the tag
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          HEADER="$(grep -E "this->version[[:space:]]*=[[:space:]]*'" messageglobesync.php | head -1 | sed -E "s/.*=[[:space:]]*'([^']+)'.*/\1/")"
+          XML="$(grep -oE '<version><!\[CDATA\[[^]]+' config.xml | head -1 | sed -E 's/.*\[CDATA\[//')"
+          if [ "$HEADER" != "${{ steps.v.outputs.version }}" ]; then
+            echo "::warning::Module version ($HEADER) does not match the tag (${{ steps.v.outputs.version }}). Bump \$this->version in messageglobesync.php."
+          fi
+          if [ "$XML" != "${{ steps.v.outputs.version }}" ]; then
+            echo "::warning::config.xml version ($XML) does not match the tag (${{ steps.v.outputs.version }})."
+          fi
+
+      - name: Build installable zip
+        id: zip
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.v.outputs.version }}"
+          rm -rf build && mkdir -p build/messageglobesync
+          rsync -a \
+            --exclude='.git' --exclude='.github' --exclude='.gitignore' \
+            --exclude='build' --exclude='*.zip' --exclude='.DS_Store' \
+            ./ build/messageglobesync/
+          cd build
+          zip -r -q -X "messageglobesync-${VERSION}.zip" messageglobesync -x '*.DS_Store'
+          echo "file=build/messageglobesync-${VERSION}.zip" >> "$GITHUB_OUTPUT"
+          echo "name=messageglobesync-${VERSION}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Verify zip structure
+        run: |
+          set -euo pipefail
+          ZIP="${{ steps.zip.outputs.file }}"
+          # PrestaShop requires a single top-level folder matching the module name.
+          for path in \
+            messageglobesync/messageglobesync.php \
+            messageglobesync/config.xml \
+            messageglobesync/logo.png \
+            messageglobesync/vendor/autoload.php \
+            messageglobesync/vendor/messageglobe/sdk/src/Contacts/ContactsClient.php \
+            messageglobesync/src/Service/MessageGlobeSmtpMailer.php \
+            messageglobesync/controllers/front/cron.php; do
+            unzip -l "$ZIP" | grep -q " ${path}$" || { echo "::error::Missing ${path} in zip"; exit 1; }
+          done
+          if unzip -l "$ZIP" | grep -qE 'messageglobesync/(\.git|\.github)/'; then
+            echo "::error::Zip contains VCS/CI files"; exit 1
+          fi
+          if unzip -l "$ZIP" | grep -qiE 'phpmailer'; then
+            echo "::error::Zip unexpectedly contains PHPMailer"; exit 1
+          fi
+          echo "Zip contents summary:"
+          unzip -l "$ZIP" | tail -1
+
+      - name: Attach to release (tag builds)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.zip.outputs.file }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+      - name: Upload artifact (manual builds)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.zip.outputs.name }}
+          path: ${{ steps.zip.outputs.file }}
+          if-no-files-found: error

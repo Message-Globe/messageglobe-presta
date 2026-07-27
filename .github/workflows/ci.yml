@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: PHP lint (${{ matrix.php }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # PrestaShop 8.1 runs on PHP 7.4–8.1; PrestaShop 9 on 8.1+. The bundled
+        # SDK targets PHP 7.4+, so the module must parse cleanly across the range.
+        php: ['7.4', '8.0', '8.1', '8.2', '8.3']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: curl, json, mbstring
+          coverage: none
+
+      - name: Lint every PHP file (php -l)
+        run: |
+          set -euo pipefail
+          # Parse-check the module and the bundled SDK on this PHP version.
+          # xargs -P parallelises; any parse error fails the step.
+          find . -type f -name '*.php' -not -path './build/*' -print0 \
+            | xargs -0 -n1 -P4 -I{} php -l "{}" > /dev/null
+          echo "All PHP files pass php -l on PHP ${{ matrix.php }}"
+
+  structure:
+    name: Module structure & version
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Required files present
+        run: |
+          set -euo pipefail
+          required=(
+            messageglobesync.php
+            config.xml
+            logo.png
+            vendor/autoload.php
+            vendor/messageglobe/sdk/src/ApiConfig.php
+            vendor/messageglobe/sdk/src/Contacts/ContactsClient.php
+            vendor/messageglobe/sdk/src/Contacts/ContactRequest.php
+            src/Service/MessageGlobeSmtpMailer.php
+            controllers/front/cron.php
+          )
+          for f in "${required[@]}"; do
+            test -f "$f" || { echo "::error::Missing required file: $f"; exit 1; }
+          done
+          echo "Module structure OK"
+
+      - name: No bundled PHPMailer / SDK email layer
+        run: |
+          set -euo pipefail
+          # The module must stay dependency-free: email uses the custom SMTP
+          # mailer, so the SDK's PHPMailer-backed Email layer is never bundled.
+          if grep -rniq "phpmailer" vendor; then
+            echo "::error::vendor/ contains a PHPMailer reference — it must not be bundled"; exit 1
+          fi
+          if [ -e vendor/messageglobe/sdk/src/Email ]; then
+            echo "::error::SDK Email layer must not be bundled"; exit 1
+          fi
+          echo "No PHPMailer / SDK email layer bundled — OK"
+
+      - name: Version consistency (module header vs config.xml)
+        run: |
+          set -euo pipefail
+          PHP_VER="$(grep -E "this->version[[:space:]]*=[[:space:]]*'" messageglobesync.php | head -1 | sed -E "s/.*=[[:space:]]*'([^']+)'.*/\1/")"
+          XML_VER="$(grep -oE '<version><!\[CDATA\[[^]]+' config.xml | head -1 | sed -E 's/.*\[CDATA\[//')"
+          echo "messageglobesync.php: '$PHP_VER'  |  config.xml: '$XML_VER'"
+          if [ -z "$PHP_VER" ] || [ "$PHP_VER" != "$XML_VER" ]; then
+            echo "::error::Version mismatch between messageglobesync.php ($PHP_VER) and config.xml ($XML_VER)"; exit 1
+          fi
+          echo "Version strings match"
