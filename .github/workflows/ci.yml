@@ -70,13 +70,15 @@ jobs:
           set -euo pipefail
           # The module must stay dependency-free: email uses the custom SMTP
           # mailer, so the SDK's PHPMailer-backed Email layer is never bundled.
-          if grep -rniq "phpmailer" vendor; then
-            echo "::error::vendor/ contains a PHPMailer reference — it must not be bundled"; exit 1
+          # Check for the library by path — a comment that mentions PHPMailer
+          # (e.g. explaining why it is absent) is fine.
+          if find vendor -iname '*phpmailer*' | grep -q .; then
+            echo "::error::vendor/ contains a PHPMailer path — the library must not be bundled"; exit 1
           fi
           if [ -e vendor/messageglobe/sdk/src/Email ]; then
             echo "::error::SDK Email layer must not be bundled"; exit 1
           fi
-          echo "No PHPMailer / SDK email layer bundled — OK"
+          echo "No PHPMailer library / SDK email layer bundled — OK"
 
       - name: Version consistency (module header vs config.xml)
         run: |
