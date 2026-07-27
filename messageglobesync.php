@@ -57,7 +57,7 @@ class Messageglobesync extends Module
         parent::__construct();
 
         $this->displayName = $this->l('Message Globe Contact Sync');
-        $this->description = $this->l('Syncs customer email and phone number from PrestaShop to Message Globe contacts.');
+        $this->description = $this->l('Sync customers to Message Globe, send transactional SMS (order-status updates and admin alerts), and optionally route store email through the Message Globe SMTP relay.');
         $this->ps_versions_compliancy = ['min' => '8.1.0', 'max' => _PS_VERSION_];
     }
 
