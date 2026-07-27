@@ -17,18 +17,20 @@ sync your customers into MessageGlobe contact lists and deliver every store emai
 ---
 
 MessageGlobe Sync connects your store to the [MessageGlobe](https://messageglobe.com) messaging
-platform and does two jobs, each optional:
+platform and does three jobs, each optional:
 
 - **Contact sync** — add your customers (email + phone + name) to a MessageGlobe contact list,
   automatically as they register or change, and in bulk for your existing catalog.
+- **SMS notifications** — text customers on order-status changes and alert staff on new orders,
+  using the same access token.
 - **Reliable email** — route every outgoing PrestaShop email (order confirmations, account emails,
   etc.) through the MessageGlobe SMTP relay for better deliverability.
 
-The contact-sync layer is built on the official
+The contact-sync and SMS layers are built on the official
 [MessageGlobe PHP SDK](https://github.com/Message-Globe/messageglobe-php) — bundled under `vendor/`,
-so nothing needs Composer on the server — and syncs are queued for background processing so the
-storefront and back office never block on the network. Email delivery uses the module's own
-dependency-free SMTP client, so no PHPMailer is bundled.
+so nothing needs Composer on the server — and both syncs and SMS are queued for background
+processing so the storefront and back office never block on the network. Email delivery uses the
+module's own dependency-free SMTP client, so no PHPMailer is bundled.
 
 ## Table of contents
 
@@ -38,6 +40,7 @@ dependency-free SMTP client, so no PHPMailer is bundled.
 - [Configuration](#configuration)
 - [Contact sync](#contact-sync)
 - [Bulk sync](#bulk-sync)
+- [SMS notifications](#sms-notifications)
 - [Cron queue](#cron-queue)
 - [Email takeover (SMTP)](#email-takeover-smtp)
 - [Security & privacy](#security--privacy)
@@ -52,10 +55,12 @@ dependency-free SMTP client, so no PHPMailer is bundled.
 |---|---|
 | **Contact sync** | Add customers (email, phone, first/last name) to a MessageGlobe contact group when they are created or updated. |
 | **Bulk sync** | One-click **Sync all customers** with batched, parallel AJAX requests and a progress bar. |
-| **Cron queue** | Background queue with retry/backoff and a recent-runs log — reconcile large catalogs without timeouts. |
+| **SMS notifications** | Transactional SMS via the same token — HQ/LQ gateway, sender ID, automatic GSM/Unicode, an async queue, and a test-send button. |
+| **Order-status SMS** | Text customers when an order reaches any (merchant-defined) status, with per-status templates, plus a staff new-order alert. |
+| **Cron queue** | Background queue with retry/backoff and a recent-runs log — reconcile large catalogs and drain SMS without timeouts. |
 | **SMTP email takeover** | Route all outgoing PrestaShop email through the MessageGlobe relay, with automatic fallback to PrestaShop's mailer if a send fails. |
 | **SMTP connection test** | Verify the host and credentials without sending an email. |
-| **Built on the SDK** | REST (Contacts) runs on the official MessageGlobe PHP SDK; email uses a dependency-free SMTP client — no PHPMailer bundled. |
+| **Built on the SDK** | REST (SMS, Contacts, Senders) runs on the official MessageGlobe PHP SDK; email uses a dependency-free SMTP client — no PHPMailer bundled. |
 
 ## Requirements
 
@@ -124,6 +129,35 @@ Defaults:
 
 If Cloudflare or your host blocks requests, lower the batch size or parallel count; raise them
 carefully if your server handles it well.
+
+## SMS notifications
+
+Enable **SMS** in the settings panel, choose a **sender ID** (loaded live from your account when
+reachable) and a **gateway**:
+
+- **HQ** — custom sender ID and delivery reports (a sender ID is required).
+- **LQ** — shared numbers, no custom sender, no delivery report.
+
+SMS uses the **same access token** as contact sync — no extra credential. Non-GSM characters (emoji,
+accents, …) are detected and sent as Unicode automatically, and every message is **queued** and sent
+by the [cron](#cron-queue) so checkout and the back office never wait on the network. A **Send test
+SMS** panel and a **Recent SMS activity** log (recipient, status, cost) sit on the same page.
+
+### Order-status SMS
+
+In **Order-status SMS templates**, tick the order statuses that should text the customer and write a
+message for each. PrestaShop order statuses are merchant-defined, so *every* status your shop has —
+including custom ones — is listed. The customer's phone is taken from the order's delivery address
+(`phone_mobile` preferred), falling back to the invoice address and then the customer's most recent
+address.
+
+Enable **Admin new-order alert** and set one or more staff numbers to be texted when an order is
+placed.
+
+Templates support these tags:
+
+`{order_reference}` `{order_id}` `{firstname}` `{lastname}` `{total_paid}` `{order_state}`
+`{payment}` `{tracking_number}` `{carrier}` `{shop_name}`
 
 ## Cron queue
 

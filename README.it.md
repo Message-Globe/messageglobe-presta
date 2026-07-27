@@ -17,19 +17,22 @@ sincronizza i tuoi clienti nelle liste contatti MessageGlobe e recapita ogni ema
 ---
 
 MessageGlobe Sync collega il tuo negozio alla piattaforma di messaggistica
-[MessageGlobe](https://messageglobe.com) e svolge due compiti, ciascuno opzionale:
+[MessageGlobe](https://messageglobe.com) e svolge tre compiti, ciascuno opzionale:
 
 - **Sincronizzazione contatti** — aggiunge i tuoi clienti (email + telefono + nome) a una lista
   contatti MessageGlobe, in automatico quando si registrano o cambiano, e in blocco per il catalogo
   esistente.
+- **Notifiche SMS** — avvisa i clienti al cambio di stato dell'ordine e lo staff sui nuovi ordini,
+  usando lo stesso access token.
 - **Email affidabili** — instrada ogni email in uscita di PrestaShop (conferme d'ordine, email
   account, ecc.) attraverso il relay SMTP di MessageGlobe per una migliore deliverability.
 
-Il layer di sincronizzazione contatti è costruito sull'
+I layer di sincronizzazione contatti e SMS sono costruiti sull'
 [SDK PHP ufficiale di MessageGlobe](https://github.com/Message-Globe/messageglobe-php) — incluso in
-`vendor/`, quindi non serve Composer sul server — e le sincronizzazioni vengono messe in coda per
-l'elaborazione in background, così front office e back office non aspettano mai la rete. Il recapito
-email usa il client SMTP dedicato del modulo, senza dipendenze, quindi nessun PHPMailer viene incluso.
+`vendor/`, quindi non serve Composer sul server — e sia le sincronizzazioni sia gli SMS vengono messi
+in coda per l'elaborazione in background, così front office e back office non aspettano mai la rete.
+Il recapito email usa il client SMTP dedicato del modulo, senza dipendenze, quindi nessun PHPMailer
+viene incluso.
 
 ## Indice
 
@@ -39,6 +42,7 @@ email usa il client SMTP dedicato del modulo, senza dipendenze, quindi nessun PH
 - [Configurazione](#configurazione)
 - [Sincronizzazione contatti](#sincronizzazione-contatti)
 - [Sincronizzazione in blocco](#sincronizzazione-in-blocco)
+- [Notifiche SMS](#notifiche-sms)
 - [Coda cron](#coda-cron)
 - [Instradamento email (SMTP)](#instradamento-email-smtp)
 - [Sicurezza e privacy](#sicurezza-e-privacy)
@@ -53,10 +57,12 @@ email usa il client SMTP dedicato del modulo, senza dipendenze, quindi nessun PH
 |---|---|
 | **Sincronizzazione contatti** | Aggiunge i clienti (email, telefono, nome e cognome) a un gruppo contatti MessageGlobe quando vengono creati o aggiornati. |
 | **Sincronizzazione in blocco** | **Sincronizza tutti i clienti** con un clic, con richieste AJAX parallele a lotti e barra di avanzamento. |
-| **Coda cron** | Coda in background con retry/backoff e registro delle esecuzioni recenti — riconcilia cataloghi grandi senza timeout. |
+| **Notifiche SMS** | SMS transazionali con lo stesso token — gateway HQ/LQ, sender ID, GSM/Unicode automatico, coda asincrona e pulsante di test. |
+| **SMS per stato ordine** | Avvisa i clienti quando un ordine raggiunge uno stato qualsiasi (definito dal negozio), con template per stato, più un avviso nuovo-ordine allo staff. |
+| **Coda cron** | Coda in background con retry/backoff e registro delle esecuzioni recenti — riconcilia cataloghi grandi e smaltisce gli SMS senza timeout. |
 | **Takeover email SMTP** | Instrada tutte le email in uscita di PrestaShop attraverso il relay MessageGlobe, con fallback automatico al mailer di PrestaShop se un invio fallisce. |
 | **Test connessione SMTP** | Verifica host e credenziali senza inviare un'email. |
-| **Costruito sull'SDK** | Il REST (Contatti) usa l'SDK PHP ufficiale di MessageGlobe; l'email usa un client SMTP senza dipendenze — nessun PHPMailer incluso. |
+| **Costruito sull'SDK** | Il REST (SMS, Contatti, Sender) usa l'SDK PHP ufficiale di MessageGlobe; l'email usa un client SMTP senza dipendenze — nessun PHPMailer incluso. |
 
 ## Requisiti
 
@@ -127,6 +133,36 @@ Impostazioni predefinite:
 
 Se Cloudflare o il tuo host bloccano le richieste, riduci la dimensione del lotto o il numero di
 richieste parallele; aumentali con cautela se il server regge bene.
+
+## Notifiche SMS
+
+Attiva **SMS** nel pannello impostazioni, scegli un **sender ID** (caricato in tempo reale dal tuo
+account quando raggiungibile) e un **gateway**:
+
+- **HQ** — sender ID personalizzato e report di consegna (il sender ID è obbligatorio).
+- **LQ** — numeri condivisi, nessun mittente personalizzato, nessun report di consegna.
+
+L'SMS usa lo **stesso access token** della sincronizzazione contatti — nessuna credenziale in più. I
+caratteri non-GSM (emoji, accenti, …) vengono rilevati e inviati come Unicode automaticamente, e ogni
+messaggio è **messo in coda** e inviato dal [cron](#coda-cron), così checkout e back office non
+aspettano mai la rete. Nella stessa pagina ci sono un pannello **Invia SMS di test** e un registro
+**Attività SMS recente** (destinatario, stato, costo).
+
+### SMS per stato ordine
+
+In **Template SMS per stato ordine**, seleziona gli stati che devono avvisare il cliente e scrivi un
+messaggio per ciascuno. Gli stati ordine di PrestaShop sono definiti dal negozio, quindi *ogni* stato
+del tuo shop — inclusi quelli personalizzati — è elencato. Il telefono del cliente è preso
+dall'indirizzo di consegna dell'ordine (`phone_mobile` preferito), con fallback all'indirizzo di
+fatturazione e poi all'indirizzo più recente del cliente.
+
+Attiva **Avviso nuovo ordine allo staff** e imposta uno o più numeri da avvisare alla creazione di un
+ordine.
+
+I template supportano questi tag:
+
+`{order_reference}` `{order_id}` `{firstname}` `{lastname}` `{total_paid}` `{order_state}`
+`{payment}` `{tracking_number}` `{carrier}` `{shop_name}`
 
 ## Coda cron
 

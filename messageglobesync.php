@@ -30,11 +30,26 @@ class Messageglobesync extends Module
     public const TABLE_CRON_LOG = 'messageglobe_cron_log';
     public const MAX_QUEUE_ATTEMPTS = 5;
 
+    // ── SMS ────────────────────────────────────────────────────────────────
+    public const CONFIG_SMS_ENABLED = 'MESSAGEGLOBE_SMS_ENABLED';
+    public const CONFIG_SMS_SENDER_ID = 'MESSAGEGLOBE_SMS_SENDER_ID';
+    public const CONFIG_SMS_GATEWAY = 'MESSAGEGLOBE_SMS_GATEWAY';
+    public const CONFIG_SMS_CUSTOMER_ENABLED = 'MESSAGEGLOBE_SMS_CUSTOMER_ENABLED';
+    public const CONFIG_SMS_STATE_MAP = 'MESSAGEGLOBE_SMS_STATE_MAP';
+    public const CONFIG_SMS_ADMIN_ENABLED = 'MESSAGEGLOBE_SMS_ADMIN_ENABLED';
+    public const CONFIG_SMS_ADMIN_RECIPIENTS = 'MESSAGEGLOBE_SMS_ADMIN_RECIPIENTS';
+    public const CONFIG_SMS_ADMIN_TEMPLATE = 'MESSAGEGLOBE_SMS_ADMIN_TEMPLATE';
+    public const DEFAULT_SMS_GATEWAY = 'HQ';
+    public const DEFAULT_SMS_ADMIN_TEMPLATE = 'New order {order_reference} — {total_paid} ({payment})';
+    public const TABLE_SMS_QUEUE = 'messageglobe_sms_queue';
+    public const TABLE_SMS_LOG = 'messageglobe_sms_log';
+    public const MAX_SMS_ATTEMPTS = 3;
+
     public function __construct()
     {
         $this->name = 'messageglobesync';
         $this->tab = 'administration';
-        $this->version = '1.2.0';
+        $this->version = '1.3.0';
         $this->author = 'Message Globe SRL';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -49,12 +64,15 @@ class Messageglobesync extends Module
     public function install()
     {
         $this->setEmailDefaults();
+        $this->setSmsDefaults();
 
         return parent::install()
             && $this->installDatabase()
             && $this->registerHook('actionObjectCustomerAddAfter')
             && $this->registerHook('actionObjectCustomerUpdateAfter')
-            && $this->registerHook('actionEmailSendBefore');
+            && $this->registerHook('actionEmailSendBefore')
+            && $this->registerHook('actionValidateOrder')
+            && $this->registerHook('actionOrderStatusPostUpdate');
     }
 
     public function uninstall()
@@ -70,6 +88,14 @@ class Messageglobesync extends Module
         Configuration::deleteByName(static::CONFIG_SMTP_PASSWORD);
         Configuration::deleteByName(static::CONFIG_SMTP_FROM);
         Configuration::deleteByName(static::CONFIG_SMTP_FROM_NAME);
+        Configuration::deleteByName(static::CONFIG_SMS_ENABLED);
+        Configuration::deleteByName(static::CONFIG_SMS_SENDER_ID);
+        Configuration::deleteByName(static::CONFIG_SMS_GATEWAY);
+        Configuration::deleteByName(static::CONFIG_SMS_CUSTOMER_ENABLED);
+        Configuration::deleteByName(static::CONFIG_SMS_STATE_MAP);
+        Configuration::deleteByName(static::CONFIG_SMS_ADMIN_ENABLED);
+        Configuration::deleteByName(static::CONFIG_SMS_ADMIN_RECIPIENTS);
+        Configuration::deleteByName(static::CONFIG_SMS_ADMIN_TEMPLATE);
 
         return $this->uninstallDatabase() && parent::uninstall();
     }
@@ -87,13 +113,26 @@ class Messageglobesync extends Module
         }
     }
 
+    protected function setSmsDefaults()
+    {
+        if (Configuration::get(static::CONFIG_SMS_GATEWAY) === false) {
+            Configuration::updateValue(static::CONFIG_SMS_GATEWAY, static::DEFAULT_SMS_GATEWAY);
+        }
+        if (Configuration::get(static::CONFIG_SMS_ADMIN_TEMPLATE) === false) {
+            Configuration::updateValue(static::CONFIG_SMS_ADMIN_TEMPLATE, static::DEFAULT_SMS_ADMIN_TEMPLATE);
+        }
+    }
+
     public function getContent()
     {
         // Ensures new tables/hooks/defaults are provisioned when an already-installed
         // module is upgraded by uploading a new zip.
         $this->installDatabase();
         $this->setEmailDefaults();
+        $this->setSmsDefaults();
         $this->registerHook('actionEmailSendBefore');
+        $this->registerHook('actionValidateOrder');
+        $this->registerHook('actionOrderStatusPostUpdate');
 
         // Remove hooks earlier versions registered but this version no longer
         // uses (address changes and customer deletion no longer sync), so a
@@ -165,7 +204,33 @@ class Messageglobesync extends Module
             $output .= $this->displayConfirmation($this->l('Message Globe sync queue cleared.'));
         }
 
-        return $this->renderBrandHeader() . $output . $this->renderForm() . $this->renderEmailForm() . $this->renderEmailTestPanel() . $this->renderBulkSyncPanel();
+        if (Tools::isSubmit('submitMessageGlobeSmsConfig')) {
+            Configuration::updateValue(static::CONFIG_SMS_ENABLED, (int) Tools::getValue(static::CONFIG_SMS_ENABLED));
+            Configuration::updateValue(static::CONFIG_SMS_SENDER_ID, trim((string) Tools::getValue(static::CONFIG_SMS_SENDER_ID)));
+
+            $gateway = (string) Tools::getValue(static::CONFIG_SMS_GATEWAY);
+            Configuration::updateValue(static::CONFIG_SMS_GATEWAY, in_array($gateway, ['HQ', 'LQ'], true) ? $gateway : 'HQ');
+
+            Configuration::updateValue(static::CONFIG_SMS_CUSTOMER_ENABLED, (int) Tools::getValue(static::CONFIG_SMS_CUSTOMER_ENABLED));
+            Configuration::updateValue(static::CONFIG_SMS_ADMIN_ENABLED, (int) Tools::getValue(static::CONFIG_SMS_ADMIN_ENABLED));
+            Configuration::updateValue(static::CONFIG_SMS_ADMIN_RECIPIENTS, trim((string) Tools::getValue(static::CONFIG_SMS_ADMIN_RECIPIENTS)));
+            Configuration::updateValue(static::CONFIG_SMS_ADMIN_TEMPLATE, (string) Tools::getValue(static::CONFIG_SMS_ADMIN_TEMPLATE));
+
+            if ((int) Configuration::get(static::CONFIG_SMS_ENABLED) === 1 && !$this->hasAccessToken()) {
+                $output .= $this->displayWarning($this->l('SMS is enabled but the access token is not set. Add it in the Message Globe settings above.'));
+            }
+
+            $output .= $this->displayConfirmation($this->l('SMS settings updated successfully.'));
+        }
+
+        if (Tools::isSubmit('submitMessageGlobeSmsStates')) {
+            $this->saveSmsStateMap();
+            $output .= $this->displayConfirmation($this->l('Order-status SMS templates saved.'));
+        }
+
+        return $this->renderBrandHeader() . $output
+            . $this->renderForm() . $this->renderEmailForm() . $this->renderEmailTestPanel() . $this->renderBulkSyncPanel()
+            . $this->renderSmsForm() . $this->renderSmsStatePanel() . $this->renderSmsTestPanel() . $this->renderSmsLogPanel();
     }
 
     public function hookActionEmailSendBefore(array $params)
@@ -917,10 +982,14 @@ class Messageglobesync extends Module
 
         $action = (string) Tools::getValue('messageglobe_action');
 
-        // The SMTP test is independent of the contact-sync token/group, so it is
-        // handled before the sync configuration gate below.
+        // The SMTP and SMS tests are independent of the contact-sync group id, so
+        // they are handled before the sync configuration gate below.
         if ($action === 'smtp_test') {
             $this->ajaxTestSmtp();
+        }
+
+        if ($action === 'sms_test') {
+            $this->ajaxTestSms();
         }
 
         if (!$this->isConfigured()) {
@@ -1271,40 +1340,54 @@ class Messageglobesync extends Module
 
     public function runCron($token, $limit = 25)
     {
+        $base = [
+            'success' => true,
+            'message' => '',
+            'processed' => 0,
+            'synced' => 0,
+            'failed' => 0,
+            'retried' => 0,
+            'remaining' => 0,
+            'sms_processed' => 0,
+            'sms_sent' => 0,
+            'sms_failed' => 0,
+            'sms_retried' => 0,
+        ];
+
         $configuredToken = (string) Configuration::get(static::CONFIG_CRON_TOKEN);
         if ($configuredToken === '' || !hash_equals($configuredToken, (string) $token)) {
-            $result = [
-                'success' => false,
-                'message' => 'Invalid cron token.',
-                'processed' => 0,
-                'synced' => 0,
-                'failed' => 0,
-                'retried' => 0,
-                'remaining' => 0,
-            ];
+            $result = array_merge($base, ['success' => false, 'message' => 'Invalid cron token.']);
             $this->logCronRun($result);
 
             return $result;
         }
 
-        if (!$this->isConfigured()) {
-            $result = [
-                'success' => false,
-                'message' => 'Module is not configured.',
-                'processed' => 0,
-                'synced' => 0,
-                'failed' => 0,
-                'retried' => 0,
-                'remaining' => 0,
-            ];
+        // Contact sync needs the token + group id; SMS needs only the token.
+        if (!$this->isConfigured() && !$this->hasAccessToken()) {
+            $result = array_merge($base, ['success' => false, 'message' => 'Module is not configured.']);
             $this->logCronRun($result);
 
             return $result;
         }
 
         $limit = max(1, min(100, (int) $limit));
+        $result = $base;
 
-        $result = $this->processQueueBatch($limit);
+        if ($this->isConfigured()) {
+            $result = array_merge($result, $this->processQueueBatch($limit));
+        }
+
+        if ($this->hasAccessToken()) {
+            $result = array_merge($result, $this->processSmsQueueBatch($limit));
+        }
+
+        $result['success'] = true;
+        $result['message'] = sprintf(
+            'Processed %d sync, %d SMS.',
+            (int) $result['processed'],
+            (int) $result['sms_processed']
+        );
+
         $this->logCronRun($result);
 
         return $result;
@@ -1622,15 +1705,7 @@ class Messageglobesync extends Module
      */
     protected function getContactsClient()
     {
-        $config = new \MessageGlobe\ApiConfig(
-            trim((string) Configuration::get(static::CONFIG_ACCESS_TOKEN)),
-            \MessageGlobe\ApiConfig::DEFAULT_BASE_URL,
-            \MessageGlobe\ApiConfig::LANGUAGE_IT
-        );
-
-        $http = new \MessageGlobe\Http\CurlHttpClient(15, 5, 'messageglobesync/' . $this->version);
-
-        return new \MessageGlobe\Contacts\ContactsClient($config, $http);
+        return new \MessageGlobe\Contacts\ContactsClient($this->getApiConfig(), $this->getHttpClient());
     }
 
     protected function getGroupId()
@@ -1719,6 +1794,781 @@ class Messageglobesync extends Module
         Db::getInstance()->delete(static::TABLE_CONTACT_MAP, 'id_customer = ' . (int) $idCustomer);
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // SMS: order hooks
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * New-order admin alert. Fires when an order is validated (checkout).
+     */
+    public function hookActionValidateOrder(array $params)
+    {
+        if (!$this->isSmsReady() || (int) Configuration::get(static::CONFIG_SMS_ADMIN_ENABLED) !== 1) {
+            return;
+        }
+
+        $recipients = trim((string) Configuration::get(static::CONFIG_SMS_ADMIN_RECIPIENTS));
+        if ($recipients === '') {
+            return;
+        }
+
+        if (empty($params['order']) || !Validate::isLoadedObject($params['order'])) {
+            return;
+        }
+
+        $order = $params['order'];
+        $orderState = isset($params['orderStatus']) ? $params['orderStatus'] : null;
+
+        $template = trim((string) Configuration::get(static::CONFIG_SMS_ADMIN_TEMPLATE));
+        if ($template === '') {
+            $template = static::DEFAULT_SMS_ADMIN_TEMPLATE;
+        }
+
+        $message = $this->renderSmsTemplate($template, $this->buildOrderVars($order, $orderState));
+        if ($message !== '') {
+            $this->enqueueSms($recipients, $message);
+        }
+    }
+
+    /**
+     * Customer order-status SMS. Fires after any order status change (including
+     * the initial state set at order creation).
+     */
+    public function hookActionOrderStatusPostUpdate(array $params)
+    {
+        if (!$this->isSmsReady() || (int) Configuration::get(static::CONFIG_SMS_CUSTOMER_ENABLED) !== 1) {
+            return;
+        }
+
+        $newState = isset($params['newOrderStatus']) ? $params['newOrderStatus'] : null;
+        $idOrder = isset($params['id_order']) ? (int) $params['id_order'] : 0;
+        if (!Validate::isLoadedObject($newState) || $idOrder <= 0) {
+            return;
+        }
+
+        $map = $this->getSmsStateMap();
+        $idState = (int) $newState->id;
+        if (empty($map[$idState]) || (int) $map[$idState]['enabled'] !== 1) {
+            return;
+        }
+
+        $template = isset($map[$idState]['template']) ? trim((string) $map[$idState]['template']) : '';
+        if ($template === '') {
+            return;
+        }
+
+        $order = new Order($idOrder);
+        if (!Validate::isLoadedObject($order)) {
+            return;
+        }
+
+        $phone = $this->resolveOrderPhone($order);
+        if ($phone === '') {
+            return;
+        }
+
+        $message = $this->renderSmsTemplate($template, $this->buildOrderVars($order, $newState));
+        if ($message !== '') {
+            $this->enqueueSms($phone, $message);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // SMS: helpers
+    // ─────────────────────────────────────────────────────────────────────
+
+    protected function hasAccessToken()
+    {
+        return trim((string) Configuration::get(static::CONFIG_ACCESS_TOKEN)) !== '';
+    }
+
+    protected function isSmsReady()
+    {
+        return (int) Configuration::get(static::CONFIG_SMS_ENABLED) === 1 && $this->hasAccessToken();
+    }
+
+    protected function getSmsClient()
+    {
+        return new \MessageGlobe\Sms\SmsClient($this->getApiConfig(), $this->getHttpClient());
+    }
+
+    protected function getSendersClient()
+    {
+        return new \MessageGlobe\Senders\SendersClient($this->getApiConfig(), $this->getHttpClient());
+    }
+
+    protected function getApiConfig()
+    {
+        return new \MessageGlobe\ApiConfig(
+            trim((string) Configuration::get(static::CONFIG_ACCESS_TOKEN)),
+            \MessageGlobe\ApiConfig::DEFAULT_BASE_URL,
+            \MessageGlobe\ApiConfig::LANGUAGE_IT
+        );
+    }
+
+    protected function getHttpClient()
+    {
+        return new \MessageGlobe\Http\CurlHttpClient(15, 5, 'messageglobesync/' . $this->version);
+    }
+
+    /**
+     * Approved sender IDs on the account, or [] when the API is unreachable.
+     *
+     * @return array<int,string>
+     */
+    protected function getSenderOptions()
+    {
+        if (!$this->hasAccessToken()) {
+            return [];
+        }
+
+        try {
+            $senders = $this->getSendersClient()->all();
+        } catch (Exception $exception) {
+            return [];
+        }
+
+        $options = [];
+        foreach ($senders as $sender) {
+            $id = (string) $sender->senderId();
+            if ($id === '') {
+                continue;
+            }
+            $status = strtolower((string) $sender->status());
+            if ($status !== '' && $status !== 'active') {
+                continue;
+            }
+            $options[$id] = $id;
+        }
+
+        return array_values($options);
+    }
+
+    protected function renderSmsTemplate($template, array $vars)
+    {
+        return trim(str_replace(array_keys($vars), array_values($vars), (string) $template));
+    }
+
+    /**
+     * @return array<string,string>
+     */
+    protected function buildOrderVars($order, $orderState = null)
+    {
+        $customer = new Customer((int) $order->id_customer);
+        $currency = new Currency((int) $order->id_currency);
+
+        $total = number_format((float) $order->total_paid, 2);
+        try {
+            $total = (string) Tools::displayPrice((float) $order->total_paid, $currency);
+        } catch (\Throwable $exception) {
+            if (Validate::isLoadedObject($currency)) {
+                $total = number_format((float) $order->total_paid, 2) . ' ' . (string) $currency->iso_code;
+            }
+        }
+
+        $tracking = '';
+        $carrierName = '';
+        try {
+            $idOrderCarrier = (int) $order->getIdOrderCarrier();
+            if ($idOrderCarrier > 0) {
+                $orderCarrier = new OrderCarrier($idOrderCarrier);
+                if (Validate::isLoadedObject($orderCarrier)) {
+                    $tracking = (string) $orderCarrier->tracking_number;
+                }
+            }
+            if ((int) $order->id_carrier > 0) {
+                $carrier = new Carrier((int) $order->id_carrier, (int) $this->context->language->id);
+                if (Validate::isLoadedObject($carrier)) {
+                    $carrierName = (string) $carrier->name;
+                }
+            }
+        } catch (\Throwable $exception) {
+            // Tracking/carrier are best-effort; leave them blank on any failure.
+        }
+
+        return [
+            '{order_reference}' => (string) $order->reference,
+            '{order_id}' => (string) $order->id,
+            '{firstname}' => Validate::isLoadedObject($customer) ? (string) $customer->firstname : '',
+            '{lastname}' => Validate::isLoadedObject($customer) ? (string) $customer->lastname : '',
+            '{total_paid}' => $total,
+            '{order_state}' => $this->orderStateName($orderState),
+            '{payment}' => (string) $order->payment,
+            '{tracking_number}' => $tracking,
+            '{carrier}' => $carrierName,
+            '{shop_name}' => (string) Configuration::get('PS_SHOP_NAME'),
+        ];
+    }
+
+    protected function orderStateName($orderState)
+    {
+        if ($orderState === null || !Validate::isLoadedObject($orderState)) {
+            return '';
+        }
+
+        if (is_array($orderState->name)) {
+            $idLang = (int) $this->context->language->id;
+            if (isset($orderState->name[$idLang])) {
+                return (string) $orderState->name[$idLang];
+            }
+            $first = reset($orderState->name);
+
+            return $first === false ? '' : (string) $first;
+        }
+
+        return (string) $orderState->name;
+    }
+
+    protected function resolveOrderPhone($order)
+    {
+        foreach ([(int) $order->id_address_delivery, (int) $order->id_address_invoice] as $idAddress) {
+            if ($idAddress <= 0) {
+                continue;
+            }
+            $address = new Address($idAddress);
+            if (!Validate::isLoadedObject($address)) {
+                continue;
+            }
+            foreach (['phone_mobile', 'phone'] as $field) {
+                if (!empty($address->$field)) {
+                    return $this->normalizePhone((string) $address->$field);
+                }
+            }
+        }
+
+        return $this->getCustomerPhone((int) $order->id_customer);
+    }
+
+    /**
+     * @return array<int,array{enabled:int,template:string}>
+     */
+    protected function getSmsStateMap()
+    {
+        $decoded = json_decode((string) Configuration::get(static::CONFIG_SMS_STATE_MAP), true);
+
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    protected function saveSmsStateMap()
+    {
+        $map = [];
+        foreach ($this->getOrderStates() as $state) {
+            $id = (int) $state['id_order_state'];
+            $enabled = (int) Tools::getValue('sms_state_enabled_' . $id);
+            $template = (string) Tools::getValue('sms_state_tpl_' . $id);
+
+            if ($enabled === 1 || trim($template) !== '') {
+                $map[$id] = ['enabled' => $enabled, 'template' => $template];
+            }
+        }
+
+        Configuration::updateValue(static::CONFIG_SMS_STATE_MAP, json_encode($map));
+    }
+
+    /**
+     * @return array<int,array<string,mixed>>
+     */
+    protected function getOrderStates()
+    {
+        $states = OrderState::getOrderStates((int) $this->context->language->id);
+
+        return is_array($states) ? $states : [];
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // SMS: async queue
+    // ─────────────────────────────────────────────────────────────────────
+
+    protected function enqueueSms($recipient, $message)
+    {
+        $recipient = trim((string) $recipient);
+        $message = (string) $message;
+        if ($recipient === '' || trim($message) === '') {
+            return false;
+        }
+
+        $now = date('Y-m-d H:i:s');
+
+        return (bool) Db::getInstance()->insert(static::TABLE_SMS_QUEUE, [
+            'recipient' => pSQL($recipient),
+            'message' => pSQL($message),
+            'sender_id' => pSQL((string) Configuration::get(static::CONFIG_SMS_SENDER_ID)),
+            'gateway' => pSQL((string) Configuration::get(static::CONFIG_SMS_GATEWAY)),
+            'status' => 'pending',
+            'attempts' => 0,
+            'next_attempt_at' => pSQL($now),
+            'last_error' => '',
+            'created_at' => pSQL($now),
+            'updated_at' => pSQL($now),
+        ]);
+    }
+
+    /**
+     * @return array{sms_processed:int,sms_sent:int,sms_failed:int,sms_retried:int}
+     */
+    protected function processSmsQueueBatch($limit)
+    {
+        $this->releaseStaleSmsJobs();
+        $jobs = $this->claimSmsJobs((int) $limit);
+        $result = ['sms_processed' => 0, 'sms_sent' => 0, 'sms_failed' => 0, 'sms_retried' => 0];
+
+        foreach ($jobs as $job) {
+            ++$result['sms_processed'];
+            $jobId = (int) $job['id_messageglobe_sms_queue'];
+
+            try {
+                $this->sendQueuedSms($job);
+                ++$result['sms_sent'];
+                $this->markSmsJobDone($jobId);
+            } catch (Exception $exception) {
+                ++$result['sms_failed'];
+                $this->logSms('failed', (string) $job['recipient'], (string) $job['message'], ['error' => $exception->getMessage()]);
+                if ($this->markSmsJobRetryOrFailed($job, $exception->getMessage())) {
+                    ++$result['sms_retried'];
+                }
+            }
+        }
+
+        return $result;
+    }
+
+    protected function sendQueuedSms(array $job)
+    {
+        $message = $this->buildSmsMessage(
+            (string) $job['recipient'],
+            (string) $job['message'],
+            (string) $job['gateway'],
+            (string) $job['sender_id']
+        );
+
+        $result = $this->getSmsClient()->send($message)->first();
+
+        $this->logSms('sent', (string) $job['recipient'], (string) $job['message'], [
+            'message_id' => $result->messageId(),
+            'cost' => $result->cost(),
+        ]);
+
+        return $result;
+    }
+
+    protected function buildSmsMessage($recipient, $body, $gateway = '', $senderId = '')
+    {
+        $message = new \MessageGlobe\Sms\SmsMessage();
+        $message->to((string) $recipient);
+
+        $gateway = (string) $gateway !== '' ? (string) $gateway : (string) Configuration::get(static::CONFIG_SMS_GATEWAY);
+        if ($gateway === 'LQ') {
+            $message->lowQuality();
+        } else {
+            $message->highQuality();
+            $senderId = (string) $senderId !== '' ? (string) $senderId : (string) Configuration::get(static::CONFIG_SMS_SENDER_ID);
+            if (trim($senderId) !== '') {
+                $message->from($senderId);
+            }
+        }
+
+        $message->messageAutoType((string) $body);
+
+        return $message;
+    }
+
+    protected function claimSmsJobs($limit)
+    {
+        $db = Db::getInstance();
+        $query = new DbQuery();
+        $query->select('*');
+        $query->from(static::TABLE_SMS_QUEUE);
+        $query->where('status = "pending"');
+        $query->where('(next_attempt_at IS NULL OR next_attempt_at <= NOW())');
+        $query->orderBy('id_messageglobe_sms_queue ASC');
+        $query->limit((int) $limit);
+
+        $jobs = $db->executeS($query);
+        if (!is_array($jobs)) {
+            return [];
+        }
+
+        $claimed = [];
+        foreach ($jobs as $job) {
+            $jobId = (int) $job['id_messageglobe_sms_queue'];
+            $updated = $db->update(static::TABLE_SMS_QUEUE, [
+                'status' => 'processing',
+                'attempts' => (int) $job['attempts'] + 1,
+                'updated_at' => pSQL(date('Y-m-d H:i:s')),
+            ], 'id_messageglobe_sms_queue = ' . $jobId . ' AND status = "pending"');
+
+            if ($updated) {
+                $claimed[] = $job;
+            }
+        }
+
+        return $claimed;
+    }
+
+    protected function markSmsJobDone($jobId)
+    {
+        Db::getInstance()->update(static::TABLE_SMS_QUEUE, [
+            'status' => 'done',
+            'last_error' => '',
+            'updated_at' => pSQL(date('Y-m-d H:i:s')),
+        ], 'id_messageglobe_sms_queue = ' . (int) $jobId);
+    }
+
+    protected function markSmsJobRetryOrFailed(array $job, $message)
+    {
+        $attempts = isset($job['attempts']) ? (int) $job['attempts'] : 0;
+        $jobId = (int) $job['id_messageglobe_sms_queue'];
+
+        if ($attempts >= static::MAX_SMS_ATTEMPTS) {
+            Db::getInstance()->update(static::TABLE_SMS_QUEUE, [
+                'status' => 'failed',
+                'last_error' => pSQL((string) $message),
+                'updated_at' => pSQL(date('Y-m-d H:i:s')),
+            ], 'id_messageglobe_sms_queue = ' . $jobId);
+
+            return false;
+        }
+
+        $delayMinutes = min(60, (int) pow(2, max(0, $attempts - 1)) * 5);
+
+        Db::getInstance()->update(static::TABLE_SMS_QUEUE, [
+            'status' => 'pending',
+            'last_error' => pSQL((string) $message),
+            'next_attempt_at' => pSQL(date('Y-m-d H:i:s', time() + ($delayMinutes * 60))),
+            'updated_at' => pSQL(date('Y-m-d H:i:s')),
+        ], 'id_messageglobe_sms_queue = ' . $jobId);
+
+        return true;
+    }
+
+    protected function releaseStaleSmsJobs()
+    {
+        Db::getInstance()->execute('UPDATE `' . _DB_PREFIX_ . static::TABLE_SMS_QUEUE . '` SET `status` = "pending", `next_attempt_at` = NOW(), `updated_at` = NOW() WHERE `status` = "processing" AND `updated_at` < DATE_SUB(NOW(), INTERVAL 15 MINUTE)');
+    }
+
+    protected function logSms($status, $recipient, $message, array $context = [])
+    {
+        $db = Db::getInstance();
+        $db->insert(static::TABLE_SMS_LOG, [
+            'recipient' => pSQL(Tools::substr((string) $recipient, 0, 190)),
+            'message' => pSQL((string) $message),
+            'status' => pSQL((string) $status),
+            'message_id' => pSQL((string) (isset($context['message_id']) ? $context['message_id'] : '')),
+            'cost' => (isset($context['cost']) && $context['cost'] !== null) ? (float) $context['cost'] : 0,
+            'error' => pSQL((string) (isset($context['error']) ? $context['error'] : '')),
+            'created_at' => pSQL(date('Y-m-d H:i:s')),
+        ]);
+
+        // Keep only the most recent 500 rows.
+        $db->execute('DELETE FROM `' . _DB_PREFIX_ . static::TABLE_SMS_LOG . '` WHERE `id_messageglobe_sms_log` NOT IN (SELECT id FROM (SELECT `id_messageglobe_sms_log` AS id FROM `' . _DB_PREFIX_ . static::TABLE_SMS_LOG . '` ORDER BY `id_messageglobe_sms_log` DESC LIMIT 500) AS recent)');
+    }
+
+    protected function getSmsLogs($limit)
+    {
+        $query = new DbQuery();
+        $query->select('*');
+        $query->from(static::TABLE_SMS_LOG);
+        $query->orderBy('id_messageglobe_sms_log DESC');
+        $query->limit((int) $limit);
+
+        $rows = Db::getInstance()->executeS($query);
+
+        return is_array($rows) ? $rows : [];
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // SMS: admin AJAX (send test)
+    // ─────────────────────────────────────────────────────────────────────
+
+    protected function ajaxTestSms()
+    {
+        if (!$this->hasAccessToken()) {
+            $this->ajaxResponse(['success' => false, 'message' => $this->l('Set the Message Globe access token first.')]);
+        }
+
+        $to = trim((string) Tools::getValue('to'));
+        $text = (string) Tools::getValue('message');
+        if ($to === '' || trim($text) === '') {
+            $this->ajaxResponse(['success' => false, 'message' => $this->l('Enter both a phone number and a message.')]);
+        }
+
+        try {
+            $result = $this->getSmsClient()->send($this->buildSmsMessage($to, $text))->first();
+            $this->logSms('sent', $to, $text, ['message_id' => $result->messageId(), 'cost' => $result->cost()]);
+
+            $this->ajaxResponse([
+                'success' => true,
+                'message' => sprintf($this->l('Test SMS accepted. Message ID: %s'), $result->messageId()),
+            ]);
+        } catch (Exception $exception) {
+            $this->logSms('failed', $to, $text, ['error' => $exception->getMessage()]);
+            $this->ajaxResponse([
+                'success' => false,
+                'message' => sprintf($this->l('SMS test failed: %s'), $exception->getMessage()),
+            ]);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // SMS: admin UI
+    // ─────────────────────────────────────────────────────────────────────
+
+    protected function renderSmsForm()
+    {
+        $senderInput = [
+            'type' => 'text',
+            'label' => $this->l('Default sender ID'),
+            'name' => static::CONFIG_SMS_SENDER_ID,
+            'desc' => $this->l('The sender shown to recipients (required for the HQ gateway; max 11 chars if alphanumeric).'),
+        ];
+
+        $senderOptions = $this->getSenderOptions();
+        if (!empty($senderOptions)) {
+            $query = [['id' => '', 'name' => $this->l('— None —')]];
+            foreach ($senderOptions as $sid) {
+                $query[] = ['id' => $sid, 'name' => $sid];
+            }
+            $senderInput = [
+                'type' => 'select',
+                'label' => $this->l('Default sender ID'),
+                'name' => static::CONFIG_SMS_SENDER_ID,
+                'options' => ['query' => $query, 'id' => 'id', 'name' => 'name'],
+                'desc' => $this->l('Approved sender IDs on your account (used with the HQ gateway).'),
+            ];
+        }
+
+        $fieldsForm = [
+            'form' => [
+                'legend' => ['title' => $this->l('SMS notifications'), 'icon' => 'icon-mobile'],
+                'description' => $this->l('Send transactional SMS through Message Globe. Uses the same access token as contact sync.'),
+                'input' => [
+                    [
+                        'type' => 'switch',
+                        'label' => $this->l('Enable SMS'),
+                        'name' => static::CONFIG_SMS_ENABLED,
+                        'is_bool' => true,
+                        'values' => [
+                            ['id' => 'sms_on', 'value' => 1, 'label' => $this->l('Enabled')],
+                            ['id' => 'sms_off', 'value' => 0, 'label' => $this->l('Disabled')],
+                        ],
+                    ],
+                    $senderInput,
+                    [
+                        'type' => 'select',
+                        'label' => $this->l('Gateway'),
+                        'name' => static::CONFIG_SMS_GATEWAY,
+                        'options' => [
+                            'query' => [
+                                ['id' => 'HQ', 'name' => $this->l('High quality (custom sender + delivery reports)')],
+                                ['id' => 'LQ', 'name' => $this->l('Low quality (shared numbers)')],
+                            ],
+                            'id' => 'id',
+                            'name' => 'name',
+                        ],
+                    ],
+                    [
+                        'type' => 'switch',
+                        'label' => $this->l('Customer order notifications'),
+                        'name' => static::CONFIG_SMS_CUSTOMER_ENABLED,
+                        'is_bool' => true,
+                        'desc' => $this->l('Text customers when their order reaches a status configured in the panel below.'),
+                        'values' => [
+                            ['id' => 'sms_cust_on', 'value' => 1, 'label' => $this->l('Enabled')],
+                            ['id' => 'sms_cust_off', 'value' => 0, 'label' => $this->l('Disabled')],
+                        ],
+                    ],
+                    [
+                        'type' => 'switch',
+                        'label' => $this->l('Admin new-order alert'),
+                        'name' => static::CONFIG_SMS_ADMIN_ENABLED,
+                        'is_bool' => true,
+                        'values' => [
+                            ['id' => 'sms_admin_on', 'value' => 1, 'label' => $this->l('Enabled')],
+                            ['id' => 'sms_admin_off', 'value' => 0, 'label' => $this->l('Disabled')],
+                        ],
+                    ],
+                    [
+                        'type' => 'text',
+                        'label' => $this->l('Alert recipients'),
+                        'name' => static::CONFIG_SMS_ADMIN_RECIPIENTS,
+                        'desc' => $this->l('Comma-separated staff phone numbers in international format.'),
+                    ],
+                    [
+                        'type' => 'textarea',
+                        'label' => $this->l('Admin alert template'),
+                        'name' => static::CONFIG_SMS_ADMIN_TEMPLATE,
+                        'rows' => 2,
+                        'cols' => 60,
+                        'desc' => $this->l('Tags: {order_reference} {order_id} {firstname} {lastname} {total_paid} {payment} {shop_name}'),
+                    ],
+                ],
+                'submit' => ['title' => $this->l('Save SMS settings')],
+            ],
+        ];
+
+        $helper = new HelperForm();
+        $helper->show_toolbar = false;
+        $helper->table = $this->table;
+        $helper->module = $this;
+        $helper->default_form_language = (int) $this->context->language->id;
+        $helper->allow_employee_form_lang = (int) Configuration::get('PS_BO_ALLOW_EMPLOYEE_FORM_LANG');
+        $helper->identifier = $this->identifier;
+        $helper->submit_action = 'submitMessageGlobeSmsConfig';
+        $helper->currentIndex = $this->context->link->getAdminLink('AdminModules', false)
+            . '&configure=' . $this->name
+            . '&tab_module=' . $this->tab
+            . '&module_name=' . $this->name;
+        $helper->token = Tools::getAdminTokenLite('AdminModules');
+        $helper->tpl_vars = [
+            'fields_value' => [
+                static::CONFIG_SMS_ENABLED => (int) Configuration::get(static::CONFIG_SMS_ENABLED),
+                static::CONFIG_SMS_SENDER_ID => Configuration::get(static::CONFIG_SMS_SENDER_ID),
+                static::CONFIG_SMS_GATEWAY => Configuration::get(static::CONFIG_SMS_GATEWAY),
+                static::CONFIG_SMS_CUSTOMER_ENABLED => (int) Configuration::get(static::CONFIG_SMS_CUSTOMER_ENABLED),
+                static::CONFIG_SMS_ADMIN_ENABLED => (int) Configuration::get(static::CONFIG_SMS_ADMIN_ENABLED),
+                static::CONFIG_SMS_ADMIN_RECIPIENTS => Configuration::get(static::CONFIG_SMS_ADMIN_RECIPIENTS),
+                static::CONFIG_SMS_ADMIN_TEMPLATE => Configuration::get(static::CONFIG_SMS_ADMIN_TEMPLATE),
+            ],
+        ];
+
+        return $helper->generateForm([$fieldsForm]);
+    }
+
+    protected function renderSmsStatePanel()
+    {
+        $states = $this->getOrderStates();
+        $map = $this->getSmsStateMap();
+        $action = htmlspecialchars($this->getModuleConfigUrl(), ENT_QUOTES, 'UTF-8');
+
+        $html = '<div class="panel"><h3><i class="icon-list"></i> ' . $this->l('Order-status SMS templates') . '</h3>';
+        $html .= '<p class="help-block">' . $this->l('Choose which order statuses text the customer, and the message for each.') . '</p>';
+        $html .= '<p class="help-block">' . $this->l('Tags:') . ' <code>{order_reference}</code> <code>{order_id}</code> <code>{firstname}</code> <code>{lastname}</code> <code>{total_paid}</code> <code>{order_state}</code> <code>{payment}</code> <code>{tracking_number}</code> <code>{carrier}</code> <code>{shop_name}</code></p>';
+        $html .= '<form method="post" action="' . $action . '">';
+        $html .= '<div class="table-responsive"><table class="table"><thead><tr><th style="width:60px; text-align:center;">' . $this->l('Send') . '</th><th style="width:220px;">' . $this->l('Order status') . '</th><th>' . $this->l('Message template') . '</th></tr></thead><tbody>';
+
+        foreach ($states as $state) {
+            $id = (int) $state['id_order_state'];
+            $name = htmlspecialchars((string) $state['name'], ENT_QUOTES, 'UTF-8');
+            $enabled = !empty($map[$id]['enabled']);
+            $template = isset($map[$id]['template']) ? (string) $map[$id]['template'] : '';
+
+            $html .= '<tr>';
+            $html .= '<td style="text-align:center; vertical-align:middle;"><input type="checkbox" name="sms_state_enabled_' . $id . '" value="1" ' . ($enabled ? 'checked="checked"' : '') . '></td>';
+            $html .= '<td style="vertical-align:middle;">' . $name . '</td>';
+            $html .= '<td><textarea name="sms_state_tpl_' . $id . '" class="form-control" rows="2" style="width:100%;">' . htmlspecialchars($template, ENT_QUOTES, 'UTF-8') . '</textarea></td>';
+            $html .= '</tr>';
+        }
+
+        $html .= '</tbody></table></div>';
+        $html .= '<button type="submit" name="submitMessageGlobeSmsStates" class="btn btn-default"><i class="icon-save"></i> ' . $this->l('Save order-status templates') . '</button>';
+        $html .= '</form></div>';
+
+        return $html;
+    }
+
+    protected function renderSmsTestPanel()
+    {
+        $ajaxUrl = $this->context->link->getAdminLink('AdminModules', true)
+            . '&configure=' . $this->name
+            . '&tab_module=' . $this->tab
+            . '&module_name=' . $this->name
+            . '&ajax=1';
+
+        $ajaxUrlJson = json_encode($ajaxUrl);
+        $labelsJson = json_encode([
+            'sending' => $this->l('Sending test SMS...'),
+            'failed' => $this->l('SMS test failed.'),
+        ]);
+
+        return '
+            <div class="panel">
+                <h3><i class="icon-mobile"></i> ' . $this->l('Send test SMS') . '</h3>
+                <p class="help-block">' . $this->l('Sends a one-off SMS using the saved sender ID and gateway. Save your SMS settings first.') . '</p>
+                <div class="form-group">
+                    <input type="text" id="messageglobe-sms-test-to" class="form-control" placeholder="' . $this->l('Phone number, e.g. 393331234567') . '">
+                </div>
+                <div class="form-group">
+                    <textarea id="messageglobe-sms-test-message" class="form-control" rows="2">' . htmlspecialchars($this->l('Message Globe test message.'), ENT_QUOTES, 'UTF-8') . '</textarea>
+                </div>
+                <button type="button" id="messageglobe-sms-test" class="btn btn-default">
+                    <i class="icon-mobile"></i> ' . $this->l('Send test SMS') . '
+                </button>
+                <div id="messageglobe-sms-test-status" class="alert" style="display:none; margin-top:12px;"></div>
+            </div>
+            <script>
+            (function () {
+                var ajaxUrl = ' . $ajaxUrlJson . ';
+                var labels = ' . $labelsJson . ';
+                var button = document.getElementById("messageglobe-sms-test");
+                var status = document.getElementById("messageglobe-sms-test-status");
+
+                if (!button) {
+                    return;
+                }
+
+                button.addEventListener("click", function () {
+                    button.disabled = true;
+                    status.style.display = "block";
+                    status.className = "alert alert-info";
+                    status.innerHTML = labels.sending;
+
+                    var data = new FormData();
+                    data.append("ajax", "1");
+                    data.append("messageglobe_action", "sms_test");
+                    data.append("to", (document.getElementById("messageglobe-sms-test-to") || {}).value || "");
+                    data.append("message", (document.getElementById("messageglobe-sms-test-message") || {}).value || "");
+
+                    fetch(ajaxUrl, { method: "POST", credentials: "same-origin", body: data })
+                        .then(function (response) { return response.json(); })
+                        .then(function (json) {
+                            status.className = "alert " + (json.success ? "alert-success" : "alert-danger");
+                            status.innerHTML = json.message || (json.success ? "OK" : labels.failed);
+                        })
+                        .catch(function (error) {
+                            status.className = "alert alert-danger";
+                            status.innerHTML = labels.failed + " " + error.message;
+                        })
+                        .then(function () {
+                            button.disabled = false;
+                        });
+                });
+            }());
+            </script>';
+    }
+
+    protected function renderSmsLogPanel()
+    {
+        $rows = $this->getSmsLogs(25);
+
+        $html = '<div class="panel"><h3><i class="icon-list-alt"></i> ' . $this->l('Recent SMS activity') . '</h3>';
+
+        if (!$rows) {
+            return $html . '<p class="help-block">' . $this->l('No SMS sent yet.') . '</p></div>';
+        }
+
+        $html .= '<div class="table-responsive"><table class="table"><thead><tr>';
+        $html .= '<th>' . $this->l('Date') . '</th>';
+        $html .= '<th>' . $this->l('Recipient') . '</th>';
+        $html .= '<th>' . $this->l('Status') . '</th>';
+        $html .= '<th>' . $this->l('Message') . '</th>';
+        $html .= '<th>' . $this->l('Cost') . '</th>';
+        $html .= '</tr></thead><tbody>';
+
+        foreach ($rows as $row) {
+            $html .= '<tr>';
+            $html .= '<td>' . htmlspecialchars((string) $row['created_at'], ENT_QUOTES, 'UTF-8') . '</td>';
+            $html .= '<td>' . htmlspecialchars((string) $row['recipient'], ENT_QUOTES, 'UTF-8') . '</td>';
+            $html .= '<td>' . htmlspecialchars((string) $row['status'], ENT_QUOTES, 'UTF-8') . '</td>';
+            $html .= '<td>' . htmlspecialchars(Tools::substr((string) $row['message'], 0, 80), ENT_QUOTES, 'UTF-8') . '</td>';
+            $html .= '<td>' . htmlspecialchars((string) $row['cost'], ENT_QUOTES, 'UTF-8') . '</td>';
+            $html .= '</tr>';
+        }
+
+        $html .= '</tbody></table></div></div>';
+
+        return $html;
+    }
+
     protected function installDatabase()
     {
         $sql = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . static::TABLE_CONTACT_MAP . '` (
@@ -1760,10 +2610,40 @@ class Messageglobesync extends Module
             PRIMARY KEY (`id_messageglobe_cron_log`)
         ) ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8mb4;';
 
+        $smsQueueSql = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . static::TABLE_SMS_QUEUE . '` (
+            `id_messageglobe_sms_queue` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `recipient` VARCHAR(64) NOT NULL,
+            `message` TEXT NOT NULL,
+            `sender_id` VARCHAR(32) DEFAULT NULL,
+            `gateway` VARCHAR(2) DEFAULT NULL,
+            `status` VARCHAR(16) NOT NULL DEFAULT "pending",
+            `attempts` INT UNSIGNED NOT NULL DEFAULT 0,
+            `next_attempt_at` DATETIME NULL,
+            `last_error` TEXT NULL,
+            `created_at` DATETIME NOT NULL,
+            `updated_at` DATETIME NOT NULL,
+            PRIMARY KEY (`id_messageglobe_sms_queue`),
+            KEY `idx_messageglobe_sms_status` (`status`)
+        ) ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8mb4;';
+
+        $smsLogSql = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . static::TABLE_SMS_LOG . '` (
+            `id_messageglobe_sms_log` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `recipient` VARCHAR(190) NOT NULL DEFAULT "",
+            `message` TEXT NULL,
+            `status` VARCHAR(16) NOT NULL DEFAULT "",
+            `message_id` VARCHAR(64) DEFAULT NULL,
+            `cost` DECIMAL(10,4) NOT NULL DEFAULT 0,
+            `error` TEXT NULL,
+            `created_at` DATETIME NOT NULL,
+            PRIMARY KEY (`id_messageglobe_sms_log`),
+            KEY `idx_messageglobe_sms_log_created` (`created_at`)
+        ) ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8mb4;';
+
         $alterNextAttemptSql = 'ALTER TABLE `' . _DB_PREFIX_ . static::TABLE_SYNC_QUEUE . '` ADD COLUMN `next_attempt_at` DATETIME NULL';
 
         $db = Db::getInstance();
-        $ok = $db->execute($sql) && $db->execute($queueSql) && $db->execute($logSql);
+        $ok = $db->execute($sql) && $db->execute($queueSql) && $db->execute($logSql)
+            && $db->execute($smsQueueSql) && $db->execute($smsLogSql);
 
         $columns = $db->executeS('SHOW COLUMNS FROM `' . _DB_PREFIX_ . static::TABLE_SYNC_QUEUE . '` LIKE "next_attempt_at"');
         if (empty($columns)) {
@@ -1778,7 +2658,12 @@ class Messageglobesync extends Module
         $sql = 'DROP TABLE IF EXISTS `' . _DB_PREFIX_ . static::TABLE_CONTACT_MAP . '`';
         $queueSql = 'DROP TABLE IF EXISTS `' . _DB_PREFIX_ . static::TABLE_SYNC_QUEUE . '`';
         $logSql = 'DROP TABLE IF EXISTS `' . _DB_PREFIX_ . static::TABLE_CRON_LOG . '`';
+        $smsQueueSql = 'DROP TABLE IF EXISTS `' . _DB_PREFIX_ . static::TABLE_SMS_QUEUE . '`';
+        $smsLogSql = 'DROP TABLE IF EXISTS `' . _DB_PREFIX_ . static::TABLE_SMS_LOG . '`';
 
-        return Db::getInstance()->execute($sql) && Db::getInstance()->execute($queueSql) && Db::getInstance()->execute($logSql);
+        $db = Db::getInstance();
+
+        return $db->execute($sql) && $db->execute($queueSql) && $db->execute($logSql)
+            && $db->execute($smsQueueSql) && $db->execute($smsLogSql);
     }
 }
