@@ -1,6 +1,6 @@
 <div align="center">
 
-# MessageGlobe Sync for PrestaShop
+# Message Globe for PrestaShop
 
 **The official PrestaShop module for [MessageGlobe](https://messageglobe.com)** —
 sync your customers into MessageGlobe contact lists and deliver every store email over SMTP.
@@ -16,7 +16,7 @@ sync your customers into MessageGlobe contact lists and deliver every store emai
 
 ---
 
-MessageGlobe Sync connects your store to the [MessageGlobe](https://messageglobe.com) messaging
+Message Globe for PrestaShop connects your store to the [MessageGlobe](https://messageglobe.com) messaging
 platform and does three jobs, each optional:
 
 - **Contact sync** — add your customers (email + phone + name) to a MessageGlobe contact list,

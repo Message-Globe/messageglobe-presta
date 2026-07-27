@@ -1,6 +1,6 @@
 <div align="center">
 
-# MessageGlobe Sync per PrestaShop
+# Message Globe per PrestaShop
 
 **Il modulo ufficiale PrestaShop per [MessageGlobe](https://messageglobe.com)** —
 sincronizza i tuoi clienti nelle liste contatti MessageGlobe e recapita ogni email del negozio via SMTP.
@@ -16,7 +16,7 @@ sincronizza i tuoi clienti nelle liste contatti MessageGlobe e recapita ogni ema
 
 ---
 
-MessageGlobe Sync collega il tuo negozio alla piattaforma di messaggistica
+Message Globe per PrestaShop collega il tuo negozio alla piattaforma di messaggistica
 [MessageGlobe](https://messageglobe.com) e svolge tre compiti, ciascuno opzionale:
 
 - **Sincronizzazione contatti** — aggiunge i tuoi clienti (email + telefono + nome) a una lista
